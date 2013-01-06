@@ -30,10 +30,13 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <QtCore/QBool>
 
 #include "blowfishtables.h"
 
+// Use Little Endian order
+#define Q_BYTE_ORDER 1
+
+// BUG: output of this code matches that of OpenSSL when Q_BYTE_ORDER is 0
 
 BlowFish::BlowFish() {
 	_blksz = 8;
