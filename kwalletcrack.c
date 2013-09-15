@@ -13,9 +13,9 @@
 #include <assert.h>
 #include <stdint.h>
 #include <gcrypt.h>
+#include "common.h"
 #include <openssl/sha.h>
-#include "blowfish.h"
-#include "cbc.h"
+#include <openssl/blowfish.h>
 
 #define KWMAGIC "KWALLET\n\r\0\r\n"
 #define KWMAGIC_LEN 12
@@ -57,93 +57,52 @@ static void print_hex(unsigned char *str, int len)
 #endif
 
 #define MIN(x,y) ((x) < (y) ? (x) : (y))
-static int password2hash(const char *password, unsigned char *hash)
+static void password2hash(const char *password, unsigned char *hash, int *key_size)
 {
 	SHA_CTX ctx;
-	unsigned char block1[20] = { 0 };
-	int i;
+	unsigned char output[20 * 4];
+	unsigned char buf[20];
+	int i, j, oindex = 0;
+	int plength = strlen(password);
 
-	SHA1_Init(&ctx);
-	SHA1_Update(&ctx, password, MIN(strlen(password), 16));
-	// To make brute force take longer
-	for (i = 0; i < 2000; i++) {
-		SHA1_Final(block1, &ctx);
+	// divide the password into blocks of size 16 and hash the resulting
+	// individually!
+	for (i = 0; i <= plength; i += 16) {
 		SHA1_Init(&ctx);
-		SHA1_Update(&ctx, block1, 20);
+		SHA1_Update(&ctx, password + i, MIN(plength - i, 16));
+		// To make brute force take longer
+		for (j = 0; j < 2000; j++) {
+			SHA1_Final(buf, &ctx);
+			SHA1_Init(&ctx);
+			SHA1_Update(&ctx, buf, 20);
+		}
+		memcpy(output + oindex, buf, 20);
+		oindex += 20;
 	}
-	memcpy(hash, block1, 20);
 
-	/*if (password.size() > 16) {
-
-	   sha.process(password.data() + 16, qMin(password.size() - 16, 16));
-	   QByteArray block2(shasz, 0);
-	   // To make brute force take longer
-	   for (int i = 0; i < 2000; i++) {
-	   memcpy(block2.data(), sha.hash(), shasz);
-	   sha.reset();
-	   sha.process(block2.data(), shasz);
-	   }
-
-	   sha.reset();
-
-	   if (password.size() > 32) {
-	   sha.process(password.data() + 32, qMin(password.size() - 32, 16));
-
-	   QByteArray block3(shasz, 0);
-	   // To make brute force take longer
-	   for (int i = 0; i < 2000; i++) {
-	   memcpy(block3.data(), sha.hash(), shasz);
-	   sha.reset();
-	   sha.process(block3.data(), shasz);
-	   }
-
-	   sha.reset();
-
-	   if (password.size() > 48) {
-	   sha.process(password.data() + 48, password.size() - 48);
-
-	   QByteArray block4(shasz, 0);
-	   // To make brute force take longer
-	   for (int i = 0; i < 2000; i++) {
-	   memcpy(block4.data(), sha.hash(), shasz);
-	   sha.reset();
-	   sha.process(block4.data(), shasz);
-	   }
-
-	   sha.reset();
-	   // split 14/14/14/14
-	   hash.resize(56);
-	   memcpy(hash.data(),      block1.data(), 14);
-	   memcpy(hash.data() + 14, block2.data(), 14);
-	   memcpy(hash.data() + 28, block3.data(), 14);
-	   memcpy(hash.data() + 42, block4.data(), 14);
-	   block4.fill(0);
-	   } else {
-	   // split 20/20/16
-	   hash.resize(56);
-	   memcpy(hash.data(),      block1.data(), 20);
-	   memcpy(hash.data() + 20, block2.data(), 20);
-	   memcpy(hash.data() + 40, block3.data(), 16);
-	   }
-	   block3.fill(0);
-	   } else {
-	   // split 20/20
-	   hash.resize(40);
-	   memcpy(hash.data(),      block1.data(), 20);
-	   memcpy(hash.data() + 20, block2.data(), 20);
-	   }
-	   block2.fill(0);
-	   } else {
-	   // entirely block1
-	   hash.resize(20);
-	   memcpy(hash.data(), block1.data(), 20);
-	   }
-
-	   block1.fill(0); */
-	return 0;
+	if (plength < 16) {
+		// key size is 20
+		memcpy(hash, output, 20);
+		*key_size = 20;
+	}
+	else if (plength < 32) {
+		// key size is 40 (20/20)
+		memcpy(hash, output, 40);
+		*key_size = 40;
+	}
+	else if (plength < 48) {
+		// key size is 56 (20/20/16 split)
+		memcpy(hash, output, 56);
+		*key_size = 56;
+	}
+	else {
+		// key size is 56 (14/14/14 split)
+		memcpy(hash + 14 * 0, output +  0, 14);
+		memcpy(hash + 14 * 1, output + 20, 14);
+		memcpy(hash + 14 * 2, output + 40, 14);
+		*key_size = 56;
+	}
 }
-
-
 
 static void process_file(const char *fname)
 {
@@ -229,34 +188,45 @@ static void process_file(const char *fname)
 
 int verify_passphrase(char *passphrase)
 {
-	unsigned char key[20];
-	password2hash(passphrase, key);
+	unsigned char key[56]; /* 56 seems to be the max. key size */
 	SHA_CTX ctx;
-	BlowFish _bf;
+	BF_KEY bf_key;
 	int sz;
 	int i;
+	int key_size = 0;
 	unsigned char testhash[20];
-	CipherBlockChain bf(&_bf);
-	bf.setKey((void *) key, 20 * 8);
+	const char *t;
+	long fsize;
+	password2hash(passphrase, key, &key_size);
 	memcpy(buffer, encrypted, encrypted_size);
-	bf.decrypt(buffer, encrypted_size);
-	const char *t = (char *) buffer;
+
+	/* Blowfish implementation in KWallet is wrong w.r.t endianness
+	 * Well, that is why we had bad_blowfish_plug.c originally ;) */
+	alter_endianity(buffer, encrypted_size);
+	/* decryption stuff */
+	BF_set_key(&bf_key, key_size, key);
+	for(i = 0; i < encrypted_size; i += 8) {
+		BF_ecb_encrypt(buffer + i, buffer + i, &bf_key, 0);
+	}
+	alter_endianity(buffer, encrypted_size);
+
+	/* verification stuff */
+	t = (char *) buffer;
 
 	// strip the leading data
 	t += 8;	// one block of random data
 
 	// strip the file size off
-
-	long fsize = 0;
-	fsize |= (long (*t) << 24) &0xff000000;
+	fsize = 0;
+	fsize |= ((long) (*t) << 24) & 0xff000000;
 	t++;
-	fsize |= (long (*t) << 16) &0x00ff0000;
+	fsize |= ((long) (*t) << 16) & 0x00ff0000;
 	t++;
-	fsize |= (long (*t) << 8) &0x0000ff00;
+	fsize |= ((long) (*t) << 8) & 0x0000ff00;
 	t++;
-	fsize |= long (*t) & 0x000000ff;
+	fsize |= (long) (*t) & 0x000000ff;
 	t++;
-	if (fsize < 0 || fsize > long (encrypted_size) - 8 - 4) {
+	if (fsize < 0 || fsize > (long) (encrypted_size) - 8 - 4) {
 		// file structure error
 		return -1;
 	}

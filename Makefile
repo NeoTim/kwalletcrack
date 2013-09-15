@@ -1,6 +1,2 @@
-dummy:
-	 g++ -Wall -O3 kwalletcrack.c blowfish.cc cbc.cc blockcipher.cc -lcrypto -o kwalletcrack
-
-test:
-	 g++ -Wall -O3 testbf.cpp blowfish.cc cbc.cc blockcipher.cc -lcrypto -o testbf
-	 ./testbf
+all:
+	 gcc -Wall -O3 -std=c99 kwalletcrack.c -lcrypto -o kwalletcrack
